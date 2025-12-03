@@ -1,0 +1,89 @@
+---
+- name: Validação de Saúde do Cluster Swarm
+  hosts: managers[0]
+  become: true
+  gather_facts: false
+  vars:
+    test_service_name: "validacao_nginx"
+    replicas: 4
+
+  tasks:
+    # 1. VERIFICAÇÃO DE ESTRUTURA
+    - name: Coletar informações do Swarm
+      community.docker.docker_host_info:
+      register: docker_info
+
+    - name: "VALIDAÇÃO: Verificar contagem de Managers"
+      assert:
+        that:
+          - docker_info.host_info.Swarm.Managers == 3
+        fail_msg: "ERRO: Esperado 3 Managers, encontrado {{ docker_info.host_info.Swarm.Managers }}"
+        success_msg: "SUCESSO: 3 Managers ativos detectados."
+
+    - name: "VALIDAÇÃO: Verificar contagem Total de Nós"
+      assert:
+        that:
+          - docker_info.host_info.Swarm.Nodes == 5
+        fail_msg: "ERRO: Esperado 5 Nós no total, encontrado {{ docker_info.host_info.Swarm.Nodes }}"
+        success_msg: "SUCESSO: Total de 5 nós detectados."
+
+    # 2. TESTE DE DEPLOY
+    - name: Deploy de serviço de teste (Nginx)
+      community.docker.docker_swarm_service:
+        name: "{{ test_service_name }}"
+        image: nginx:alpine
+        replicas: "{{ replicas }}"
+        state: present
+        publish:
+          - published_port: 8080
+            target_port: 80
+      register: deploy_result
+
+    # CORREÇÃO AQUI: become: false
+    - name: Aguardar o serviço estabilizar (15s)
+      wait_for:
+        timeout: 15
+      delegate_to: localhost
+      become: false
+
+    - name: Verificar se as tarefas estão rodando
+      shell: "docker service ps {{ test_service_name }} --filter 'desired-state=running' | wc -l"
+      register: service_tasks
+      changed_when: false
+
+    - name: "VALIDAÇÃO: Confirmar tasks rodando"
+      assert:
+        that:
+          - service_tasks.stdout | int > replicas
+        success_msg: "SUCESSO: O serviço subiu {{ replicas }} réplicas."
+        fail_msg: "ERRO: As réplicas não subiram corretamente."
+
+- name: Validação de Rede (Routing Mesh)
+  hosts: workers[0]
+  become: true
+  gather_facts: false
+  tasks:
+    # 3. TESTE DE CONECTIVIDADE
+    - name: "VALIDAÇÃO: Testar acesso ao serviço via IP do Worker"
+      uri:
+        url: "http://127.0.0.1:8080"
+        return_content: yes
+      register: http_response
+      until: http_response.status == 200
+      retries: 5
+      delay: 2
+
+    - name: Confirmar que o Nginx respondeu
+      debug:
+        msg: "SUCESSO: O Worker conseguiu acessar o Nginx via Routing Mesh! Status: {{ http_response.status }}"
+
+- name: Limpeza
+  hosts: managers[0]
+  become: true
+  gather_facts: false
+  tasks:
+    # 4. REMOVER LIXO
+    - name: Remover serviço de teste
+      community.docker.docker_swarm_service:
+        name: "validacao_nginx"
+        state: absent

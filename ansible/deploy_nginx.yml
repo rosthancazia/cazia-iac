@@ -1,0 +1,64 @@
+---
+- name: 🚀 Deploy Nginx (Static Proxy) com SSL via Certbot
+  hosts: managers[0]
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - swarm_vars.yml # Carrega base_domain
+
+  tasks:
+    - name: 1. Criar diretórios necessários para Certbot
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /var/www/certbot
+        - /etc/letsencrypt/live/{{ base_domain }} # Placeholder para o Nginx não reclamar
+
+    - name: 2. Gerar configuração Nginx com base no template
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        
+    - name: 3. Obter Certificado SSL Inicial via Certbot (Container temporário)
+      ansible.builtin.shell: |
+        docker run -it --rm --network host \
+          -v /etc/letsencrypt:/etc/letsencrypt \
+          -v /var/www/certbot:/data/webroot \
+          certbot/certbot certonly --webroot \
+          --webroot-path=/data/webroot \
+          -d {{ base_domain }} -d *.{{ base_domain }} \
+          --email {{ traefik_acme_email }} \
+          --agree-tos \
+          --force-renewal
+      # Nota: A primeira vez deve falhar na checagem se o Nginx não estiver rodando, 
+      # mas o Certbot faz as verificações necessárias antes de implantar.
+
+    - name: 4. Deploy do Stack Nginx
+      community.docker.docker_stack:
+        state: present
+        name: proxy
+        compose_file: nginx-stack.yml
+        prune: yes
+
+    - name: 5. Recarregar o Nginx (Garantir que ele veja o novo certificado)
+      # Isso deve ser feito em todos os nós onde o Nginx está rodando
+      shell: docker service ps proxy_nginx --format "{{ '{{.Node}}' }}" | xargs -I {} docker exec -it $(docker ps -q --filter name=proxy_nginx_on_{}) nginx -s reload || true
+      delegate_to: localhost
+      ignore_errors: true
+
+### 5. Execução Final
+
+1.  **Crie** os arquivos `nginx.conf.j2` e `nginx-stack.yml`.
+2.  **Rode** o playbook:
+    ```bash
+    ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini deploy_nginx.yml
+    ```
+3.  **Acesse:** `https://yourdomain.com/whoami/`
+
+> ⚠️ **Atenção:** Este setup Nginx/Certbot **não** é dinâmico. Se você adicionar um novo serviço, você deve rodar o Ansible novamente para atualizar o `nginx.conf` e recarregar o Nginx.

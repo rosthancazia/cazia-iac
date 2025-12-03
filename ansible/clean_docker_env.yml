@@ -1,0 +1,45 @@
+---
+- name: 💣 RESET COMPLETO DO AMBIENTE DOCKER SWARM
+  hosts: managers:workers
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "1. Remover todos os Stacks e Serviços (Gerenciadores e Workers)"
+      shell: docker stack rm proxy || true
+      ignore_errors: true
+      # Remove qualquer outro stack se você tiver
+      # shell: docker stack ls -q | xargs -r docker stack rm || true 
+      # Esta tarefa é essencialmente um 'wait_for' implicito para os serviços.
+
+    - name: "2. Parar e Remover todos os Contêineres restantes (Geral)"
+      shell: docker ps -aq | xargs -r docker rm -f || true
+      # O '-r' evita erro se 'docker ps -aq' retornar vazio
+      ignore_errors: true
+      
+    - name: "3. Remover todos os Volumes (ATENÇÃO: Deleta todos os dados!)"
+      shell: docker volume prune -f || true
+      ignore_errors: true
+      
+    - name: "4. Remover todas as Redes não usadas (Incluindo Overlays)"
+      shell: docker network prune -f || true
+      ignore_errors: true
+
+# # --- FASE DE ENCERRAMENTO DO SWARM (Managers e Workers) ---
+
+# - name: 5. FORÇAR NÓS A SAIR DO CLUSTER SWARM
+#   hosts: managers:workers
+#   become: true
+#   gather_facts: false
+  
+#   tasks:
+#     - name: Deixar o Swarm (Workers e Managers)
+#       # Usa --force em todos para garantir que mesmo o Manager Líder saia.
+#       # O erro do Swarm ao sair será ignorado se ele já tiver saído.
+#       shell: docker swarm leave --force
+#       register: swarm_leave_result
+#       ignore_errors: true
+      
+#     - name: Exibir resultado da limpeza
+#       debug:
+#         msg: "Limpeza de nó concluída. Saída do Swarm: {{ swarm_leave_result.stdout }}"

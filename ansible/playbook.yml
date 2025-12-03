@@ -1,0 +1,126 @@
+---
+# ==========================================
+# PARTE 1: INSTALAÇÃO E CONFIGURAÇÃO BÁSICA
+# ==========================================
+- name: Instalar e Configurar Docker (Todos os Nós)
+  hosts: managers:workers
+  become: true
+  gather_facts: false # Desligado inicialmente para agilizar espera do SSH
+  tasks:
+    # 1. Espera Inteligente (Evita erro de conexão no boot)
+    # - name: Aguardar conexão SSH
+    #   wait_for_connection:
+    #     timeout: 300
+    #     delay: 10
+
+    - name: Coletar fatos do sistema
+      setup:
+
+    - name: 3. Atualizar e fazer upgrade completo dos pacotes do sistema
+      apt:
+        update_cache: yes
+        upgrade: dist # Faz o upgrade completo para garantir a última versão do kernel/pacotes
+        cache_valid_time: 3600
+
+    - name: Instalar dependências do sistema
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - gnupg
+          - lsb-release
+        state: latest
+        update_cache: yes
+
+    # 2. Configuração do Repositório Oficial Docker
+    - name: Adicionar chave GPG do Docker
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Adicionar repositório Docker (Dinâmico conforme versão do OS)
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    # 3. Instalação do Docker e SDK
+    - name: Instalar Docker CE e Python SDK
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+          # AQUI ESTÁ O PULO DO GATO:
+          # Usamos o pacote do sistema ao invés do PIP para evitar conflitos de SSL/urllib3
+          - python3-docker 
+        state: latest
+        update_cache: yes
+
+    - name: Garantir que o Docker está rodando
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Adicionar usuário ubuntu ao grupo docker
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+# ==========================================
+# PARTE 2: INICIALIZAÇÃO DO SWARM (LÍDER)
+# ==========================================
+- name: Configurar Manager Líder
+  hosts: managers[0]
+  become: true
+  tasks:
+    - name: Verificar status do Swarm
+      community.docker.docker_swarm_info:
+      register: swarm_status
+      ignore_errors: true
+
+    - name: Inicializar Swarm
+      community.docker.docker_swarm:
+        state: present
+        advertise_addr: "{{ ansible_default_ipv4.address }}"
+      when: swarm_status.failed == true or swarm_status.swarm_facts.LocalNodeState == 'inactive'
+
+    - name: Recapturar Fatos do Swarm (para pegar tokens novos)
+      community.docker.docker_swarm_info:
+      register: swarm_facts_updated
+
+    - name: Salvar Tokens na Memória (Dummy Host)
+      add_host:
+        name: "SWARM_VARS"
+        manager_token: "{{ swarm_facts_updated.swarm_facts.JoinTokens.Manager }}"
+        worker_token: "{{ swarm_facts_updated.swarm_facts.JoinTokens.Worker }}"
+        leader_ip: "{{ ansible_default_ipv4.address }}"
+
+# ==========================================
+# PARTE 3: JOIN DOS OUTROS NODES
+# ==========================================
+- name: Juntar Managers Secundários
+  hosts: managers[1:]
+  become: true
+  tasks:
+    - name: Join Swarm como Manager
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: "{{ ansible_default_ipv4.address }}"
+        join_token: "{{ hostvars['SWARM_VARS']['manager_token'] }}"
+        remote_addrs: [ "{{ hostvars['SWARM_VARS']['leader_ip'] }}:2377" ]
+
+- name: Juntar Workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: Join Swarm como Worker
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: "{{ ansible_default_ipv4.address }}"
+        join_token: "{{ hostvars['SWARM_VARS']['worker_token'] }}"
+        remote_addrs: [ "{{ hostvars['SWARM_VARS']['leader_ip'] }}:2377" ]

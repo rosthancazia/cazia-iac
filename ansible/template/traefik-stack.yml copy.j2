@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      # API e Dashboard
+      - "--api.dashboard=true"
+      # Providers (Docker Swarm)
+      - "--providers.docker=true"
+      - "--providers.docker.swarmMode=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entrypoints (Portas de entrada)
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirecionamento Global HTTP -> HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # Resolver do Let's Encrypt (TLS Challenge)
+      - "--certificatesresolvers.leresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.leresolver.acme.email={{ traefik_acme_email }}"
+      - "--certificatesresolvers.leresolver.acme.storage=/letsencrypt/acme.json"
+      # Logs (Opcional, bom para debug)
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certificates:/letsencrypt
+    networks:
+      - traefik-public
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+
+  # Serviço de Teste (Whoami)
+  whoami:
+    image: traefik/whoami
+    networks:
+      - traefik-public
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        # Rota dinâmica baseada no domínio que você digitar
+        - "traefik.http.routers.whoami.rule=Host(`whoami.{{ base_domain }}`)"
+        - "traefik.http.routers.whoami.entrypoints=websecure"
+        - "traefik.http.routers.whoami.tls.certresolver=leresolver"
+        - "traefik.http.services.whoami.loadbalancer.server.port=80"
+
+volumes:
+  traefik-certificates:
+
+networks:
+  traefik-public:
+    external: true

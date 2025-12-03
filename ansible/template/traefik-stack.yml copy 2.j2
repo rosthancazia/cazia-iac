@@ -1,0 +1,124 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      # API e Dashboard
+      - "--api.dashboard=true"
+      # Providers
+      - "--providers.docker=true"
+      - "--providers.docker.swarmMode=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Configuração Let's Encrypt
+      - "--certificatesresolvers.leresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.leresolver.acme.email={{ traefik_acme_email }}"
+      - "--certificatesresolvers.leresolver.acme.storage=/certificates/acme.json"
+      # Proxy Protocol e Forwarded Headers (CRUCIAL para o NLB)
+      - "--entrypoints.web.proxyProtocol.trustedIPs={{ trusted_ip_range }}"
+      - "--entrypoints.web.forwardedHeaders.trustedIPs={{ trusted_ip_range }}"
+      - "--entrypoints.websecure.proxyProtocol.trustedIPs={{ trusted_ip_range }}"
+      - "--entrypoints.websecure.forwardedHeaders.trustedIPs={{ trusted_ip_range }}"
+      # HTTP/3 (QUIC)
+      - "--entrypoints.websecure.http3"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+
+    ports:
+      # Mapeamento de portas (Host mode)
+      - target: 80
+        published: 80
+        mode: host
+        protocol: tcp
+      - target: 443
+        published: 443
+        mode: host
+        protocol: tcp
+      - target: 443
+        published: 443
+        mode: host
+        protocol: udp
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certificates:/certificates
+      # Se você usar configs estáticas, descomente e ajuste:
+      # - /etc/traefik/config.yml:/etc/traefik/config.yml:ro
+      # - /var/log/traefik:/var/log/traefik
+
+    networks:
+      - traefik-public
+    
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      
+      labels:
+        - "traefik.enable=true"
+        
+        # --- MIDDLEWARES DE SEGURANÇA ---
+        - "traefik.http.middlewares.admin-auth.basicauth.users={{ traefik_username }}:{{ traefik_hashed_password }}"
+        - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+        - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
+        
+        # --- 1. DASHBOARD TRAEFIK (ROTEADOR PRINCIPAL) ---
+        - "traefik.http.routers.dashboard-https.rule=Host(`traefik.{{ base_domain }}`)"
+        - "traefik.http.routers.dashboard-https.entrypoints=websecure"
+        - "traefik.http.routers.dashboard-https.tls=true"
+        - "traefik.http.routers.dashboard-https.tls.certresolver=leresolver"
+        - "traefik.http.routers.dashboard-https.service=api@internal" 
+        - "traefik.http.routers.dashboard-https.middlewares=admin-auth"
+        
+        # Dashboard: Redirecionamento HTTP
+        - "traefik.http.routers.dashboard-http.rule=Host(`traefik.{{ base_domain }}`)"
+        - "traefik.http.routers.dashboard-http.entrypoints=web"
+        - "traefik.http.routers.dashboard-http.middlewares=https-redirect"
+
+        # --- 2. ROTEADOR DE TESTE WHOAMI ---
+        # Este roteador HTTPS espera o serviço 'whoami-service'
+        - "traefik.http.routers.whoami-https.rule=Host(`whoami.{{ base_domain }}`)"
+        - "traefik.http.routers.whoami-https.entrypoints=websecure"
+        - "traefik.http.routers.whoami-https.tls=true"
+        - "traefik.http.routers.whoami-https.tls.certresolver=leresolver"
+        - "traefik.http.routers.whoami-https.service=whoami-service" # APONTA PARA O NOME DO SERVIÇO ABAIXO
+        
+        # Whoami: Redirecionamento HTTP
+        - "traefik.http.routers.whoami-http.rule=Host(`whoami.{{ base_domain }}`)"
+        - "traefik.http.routers.whoami-http.entrypoints=web"
+        - "traefik.http.routers.whoami-http.middlewares=https-redirect"
+        
+        # Define o serviço de balanceamento de carga para whoami
+        - "traefik.http.services.whoami-service.loadbalancer.server.port=80"
+      
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # Serviço de Teste (Whoami)
+  whoami:
+    image: traefik/whoami
+    networks:
+      - traefik-public
+    deploy:
+      labels:
+        # Nenhuma label de roteamento é necessária aqui, apenas a label que o Traefik usa para identificar o serviço.
+        - "traefik.enable=true" # Essencial para que o Traefik encontre este serviço
+        - "traefik.http.services.whoami-service.loadbalancer.server.port=80" # Redundante, mas útil
+        - "traefik.http.routers.whoami-https.service=whoami-service"
+        # O nome 'whoami-service' é usado nas labels do Traefik acima para ligar o roteador ao serviço.
+
+volumes:
+  traefik-certificates:
+
+networks:
+  traefik-public:
+    driver: overlay
+    external: true
