@@ -1,25 +1,40 @@
-- name: Instalar e Configurar Docker (Todos os Nós)
+---
+# ==============================================================================
+# PLAY 1: DOCKER INSTALLATION AND BASIC CONFIGURATION (MANAGERS AND WORKERS)
+# ==============================================================================
+- name: 🐋 Install and Configure Docker on Swarm Hosts
   hosts: swarm_managers:workers
   become: true
-  gather_facts: false # Desligado inicialmente para agilizar espera do SSH
+  gather_facts: false 
+  vars:
+    ansible_python_interpreter: /usr/bin/python3 
+
   tasks:
-    # 1. Espera Inteligente (Evita erro de conexão no boot)
-    # - name: Aguardar conexão SSH
-    #   wait_for_connection:
-    #     timeout: 300
-    #     delay: 10
+    # 1. PRÉ-VERIFICAÇÃO: Checar se o Docker está instalado e rodando
+    - name: ❓ Check if Docker is already installed and running
+      ansible.builtin.service_facts:
+      register: service_facts
 
-    - name: Coletar fatos do sistema
+    - name: 🔍 Determine if Docker installation is required
+      ansible.builtin.set_fact:
+        # Docker precisa ser instalado/configurado se o serviço 'docker' não estiver presente OU não estiver rodando
+        docker_install_required: "{{ not ('docker' in service_facts.services) or service_facts.services.docker.state != 'running' }}"
+      
+    - name: ⚙️ Gather system facts (required for dynamic repo setup)
       setup:
+      # Só coleta fatos se a instalação for necessária (para economizar tempo)
+      when: docker_install_required 
 
-    - name: 3. Atualizar e fazer upgrade completo dos pacotes do sistema
-      apt:
+    # --- System Update and Dependencies ---
+    - name: 🆙 Update and perform full distribution upgrade
+      ansible.builtin.apt:
         update_cache: yes
-        upgrade: dist # Faz o upgrade completo para garantir a última versão do kernel/pacotes
+        upgrade: dist 
         cache_valid_time: 3600
+      when: docker_install_required 
 
-    - name: Instalar dependências do sistema
-      apt:
+    - name: Install system dependencies
+      ansible.builtin.apt:
         name:
           - apt-transport-https
           - ca-certificates
@@ -29,40 +44,54 @@
           - lsb-release
         state: latest
         update_cache: yes
+      when: docker_install_required 
 
-    # 2. Configuração do Repositório Oficial Docker
-    - name: Adicionar chave GPG do Docker
-      apt_key:
+    # --- Docker Repository Configuration ---
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
         url: https://download.docker.com/linux/ubuntu/gpg
         state: present
+      when: docker_install_required 
 
-    - name: Adicionar repositório Docker (Dinâmico conforme versão do OS)
-      apt_repository:
+    - name: Add Docker repository (Dynamically based on OS release)
+      ansible.builtin.apt_repository:
         repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
+      when: docker_install_required 
 
-    # 3. Instalação do Docker e SDK
-    - name: Instalar Docker CE e Python SDK
-      apt:
+    # --- Docker Installation ---
+    - name: Install Docker CE and Python SDK
+      ansible.builtin.apt:
         name:
           - docker-ce
           - docker-ce-cli
           - containerd.io
           - docker-compose-plugin
-          # AQUI ESTÁ O PULO DO GATO:
-          # Usamos o pacote do sistema ao invés do PIP para evitar conflitos de SSL/urllib3
           - python3-docker 
         state: latest
         update_cache: yes
+      when: docker_install_required 
 
-    - name: Garantir que o Docker está rodando
-      service:
+    # --- Garantir que o Docker está rodando ---
+    # Esta tarefa pode rodar sempre se o Docker já estiver presente, mas condicionamos à instalação
+    - name: Ensure Docker Daemon is running
+      ansible.builtin.service:
         name: docker
         state: started
         enabled: yes
+      when: docker_install_required 
 
-    - name: Adicionar usuário ubuntu ao grupo docker
-      user:
-        name: ubuntu
+    # --- Configurar Permissões ---
+    - name: 🤝 Add user {{ ansible_user }} to the docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
         groups: docker
         append: yes
+      # Esta tarefa deve ser executada se o docker_install_required for verdadeiro
+      when: docker_install_required 
+
+    # 🚨 CRITICAL: Reset connection to apply the new 'docker' group permissions
+    - name: Apply new Docker group permissions (force SSH reconnection)
+      meta: reset_connection
+      # Só reinicia a conexão se a instalação for necessária
+      when: docker_install_required

@@ -11,6 +11,7 @@
 
 # 2. Configuração do Swarm (Depende do Docker)
 - import_playbook: swarm_setup.yml
+- import_playbook: docker_setup.yml
 
 # (Blocos comentados omitidos aqui)
 
