@@ -1,0 +1,89 @@
+---
+- name: Remove stale APT lock files
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  ignore_errors: true
+  with_items:
+    - /var/lib/apt/lists/lock
+    - /var/cache/apt/archives/lock
+    - /var/lib/dpkg/lock-frontend
+    - /var/lib/dpkg/lock
+
+- name: Update all Debian/Ubuntu packages to their latest version
+  become: true
+  ansible.builtin.apt:
+    name: "*"
+    state: latest
+  register: update_latest_result # <--- Registra o status de 'changed'
+
+- name: Update Distro
+  become: true
+  apt:
+    update_cache: yes
+    upgrade: dist
+  register: upgrade_dist_result # <--- Registra o status de 'changed'
+
+- name: Check if auto update is enabled
+  stat:
+    path: /etc/apt/apt.conf.d/20auto-upgrades
+  register: autoupdate
+
+- name: Disable auto update
+  when: autoupdate.stat.exists
+  become: true
+  become_method: sudo
+  file:
+    path: /etc/apt/apt.conf.d/20auto-upgrades
+    state: absent
+
+# --- Determinação Condicional do Reboot ---
+- name: Determine if reboot is necessary based on package changes or auto-update disablement
+  ansible.builtin.set_fact:
+    should_reboot: >
+      {{ 
+        update_latest_result.changed or 
+        upgrade_dist_result.changed or 
+        autoupdate.stat.exists
+      }}
+  # A tarefa set_fact deve ser executada em todos os hosts onde as tarefas anteriores foram executadas
+
+- name: Wait for any possibly running unattended upgrade to finish
+  when: autoupdate.stat.exists
+  become: true
+  become_method: sudo
+  raw: systemd-run --property="After=apt-daily.service apt-daily-upgrade.service" --wait /bin/true
+
+# --- Reboot Condicional ---
+- name: Reboot host(s) after system updates and configuration
+  shell: sleep 2 && /sbin/shutdown -r now "ansible reboot request"
+  async: 1
+  poll: 0
+  ignore_errors: true
+  become: true
+  become_method: sudo
+  when: should_reboot and inventory_hostname not in ["127.0.0.1", "localhost"]
+
+# --- Espera Condicional ---
+- name: Waiting for host(s) to reboot
+  local_action: "wait_for host={{inventory_hostname}} port=22 state=started delay=60"
+  become: false
+  ignore_errors: true
+  when: should_reboot and inventory_hostname not in ["127.0.0.1", "localhost"]
+
+- name: Verify system dependencies
+  become: true
+  become_method: sudo
+  apt:
+    pkg:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - python3-pip
+      - apache2-utils
+    state: present
+    force_apt_get: true
+    update_cache: yes

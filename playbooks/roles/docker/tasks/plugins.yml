@@ -1,0 +1,24 @@
+- name: Check if Gluster plugin has already been initialized
+  shell: docker plugin inspect glusterfs
+  register: gluster_plugin_status
+  ignore_errors: true
+  # Adicionar BECOME aqui!
+  become: true 
+
+- name: Install Docker Gluster plugin
+  shell: docker plugin install --alias glusterfs trajano/glusterfs-volume-plugin --grant-all-permissions --disable
+  when: gluster_plugin_status.rc != 0
+  # Adicionar BECOME aqui!
+  become: true 
+
+- name: Set Gluster plugin to use Gluster nodes
+  shell: docker plugin set glusterfs SERVERS={{groups['gluster_nodes'] | join(',')}}
+  when: gluster_plugin_status.rc != 0
+  # Adicionar BECOME aqui!
+  become: true 
+
+- name: Enable Gluster plugin
+  shell: docker plugin enable glusterfs
+  when: gluster_plugin_status.rc != 0
+  # Adicionar BECOME aqui!
+  become: true

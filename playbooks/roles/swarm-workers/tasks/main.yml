@@ -1,0 +1,11 @@
+---
+    - name: 🔍 Check if Swarm has already been initialized
+      community.docker.docker_swarm_info:
+      register: swarm_status
+
+    - name: 👷 Join Worker to the Swarm
+      community.docker.docker_swarm:
+        state: join
+        join_token: "{{ hostvars[groups['swarm_managers'][0]]['swarm_tokens']['swarm_info']['join_tokens']['worker'] }}"
+        remote_addr: "{{ groups['swarm_managers'][0] }}"
+      when: not worker_swarm_status.swarm_info.node_id

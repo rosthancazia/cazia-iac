@@ -1,0 +1,150 @@
+---
+# ==============================================================================
+# PLAY 1: DOCKER INSTALLATION AND BASIC CONFIGURATION (MANAGERS AND WORKERS)
+# ==============================================================================
+- name: 🐋 Install and Configure Docker on Swarm Hosts
+  hosts: swarm_managers:workers
+  become: true
+  gather_facts: false 
+  vars:
+    # Forces the use of Python 3 interpreter for Ansible modules
+    ansible_python_interpreter: /usr/bin/python3 
+
+  tasks:
+    - name: ⚙️ Gather system facts (required for dynamic repo setup)
+      setup:
+
+    # --- System Update and Dependencies ---
+    - name: 🆙 Update and perform full distribution upgrade
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist 
+        cache_valid_time: 3600
+
+    - name: Install system dependencies
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - gnupg
+          - lsb-release
+        state: latest
+        update_cache: yes
+
+    # --- Docker Repository Configuration ---
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository (Dynamically based on OS release)
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    # --- Docker Installation ---
+    - name: Install Docker CE and Python SDK
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+          # Python module required for Ansible's community.docker modules
+          - python3-docker 
+        state: latest
+        update_cache: yes
+
+    - name: Ensure Docker Daemon is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: 🤝 Add user {{ ansible_user }} to the docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    # 🚨 CRITICAL: Reset connection to apply the new 'docker' group permissions
+    - name: Apply new Docker group permissions (force SSH reconnection)
+      meta: reset_connection
+
+# ==============================================================================
+# PLAY 2: SWARM INITIALIZATION AND MANAGER JOINING
+# ==============================================================================
+- name: 🐋 Initialize Swarm and Join Managers
+  hosts: swarm_managers
+  become: true 
+  vars:
+    # Define the Swarm leader (the first host in the group)
+    swarm_leader: "{{ groups['swarm_managers'][0] }}"
+    # Define the leader's private IP (used for all join operations)
+    leader_private_ip: "{{ hostvars[groups['swarm_managers'][0]]['ansible_host'] }}"
+
+  tasks:
+    # --- Leader Operations ---
+    - name: 🔍 Check Swarm Status
+      community.docker.docker_swarm_info:
+      register: swarm_status
+
+    - name: 🚀 Initialize Docker Swarm Leader (If not initialized)
+      community.docker.docker_swarm:
+        state: present
+        # Use the host's private IP (ansible_host) for advertise-addr
+        advertise_addr: "{{ hostvars[inventory_hostname]['ansible_host'] }}"
+      when: 
+        - inventory_hostname == swarm_leader
+        # Check if the node is not defined in Swarm facts (i.e., not a node yet)
+        - not swarm_status.swarm_info.node_id is defined
+      register: swarm_init_result
+
+    - name: 🔑 Recapture Swarm Info to Get Join Tokens
+      community.docker.docker_swarm_info:
+        token: true
+      register: swarm_tokens
+      # Delegate to the leader to get tokens, but run_once to avoid unnecessary calls
+      delegate_to: "{{ swarm_leader }}" 
+      run_once: true
+      when: inventory_hostname == swarm_leader
+
+    # --- Secondary Manager Joining ---
+    - name: 🤝 Join secondary Managers to the Swarm
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: "{{ hostvars[inventory_hostname]['ansible_host'] }}"
+        # Retrieve manager token from the leader's hostvars
+        join_token: "{{ hostvars[swarm_leader]['swarm_tokens']['swarm_info']['join_tokens']['manager'] }}"
+        # Use the leader's private IP for the remote connection
+        remote_addrs: [ "{{ leader_private_ip }}:2377" ]
+      when:
+        - inventory_hostname != swarm_leader
+        - not swarm_status.swarm_info.node_id is defined # Only join if not already a node
+
+# ==============================================================================
+# PLAY 3: WORKER JOINING
+# ==============================================================================
+- name: 👷 Join Workers to Swarm
+  hosts: workers
+  become: true
+  vars:
+    swarm_leader: "{{ groups['swarm_managers'][0] }}"
+    leader_private_ip: "{{ hostvars[groups['swarm_managers'][0]]['ansible_host'] }}"
+
+  tasks:
+    - name: 🔍 Check Swarm Status
+      community.docker.docker_swarm_info:
+      register: worker_swarm_status
+
+    - name: 👷 Join Swarm as Worker
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: "{{ hostvars[inventory_hostname]['ansible_host'] }}"
+        # Retrieve worker token from the leader's hostvars
+        join_token: "{{ hostvars[swarm_leader]['swarm_tokens']['swarm_info']['join_tokens']['worker'] }}"
+        # Use the leader's private IP for the remote connection
+        remote_addrs: [ "{{ leader_private_ip }}:2377" ]
+      when: not worker_swarm_status.swarm_info.node_id is defined

@@ -1,6 +1,4 @@
-variable "aws_region" { default = "us-east-1" }
-variable "manager_count" { default = 3 }
-variable "worker_count" { default = 2 }
+
 
 # --- 1. LÓGICA DE GERAÇÃO DE NOMES ---
 
@@ -77,9 +75,9 @@ module "vpc" {
 
 }
 
-# SG do Bastion
-resource "aws_security_group" "bastion_sg" {
-  name   = "bastion-sg"
+# SG do haproxy
+resource "aws_security_group" "haproxy_sg" {
+  name   = "haproxy-sg"
   vpc_id = module.vpc.vpc_id
 
   ingress {
@@ -88,6 +86,21 @@ resource "aws_security_group" "bastion_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+    ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  
   egress {
     from_port = 0
     to_port   = 0
@@ -108,11 +121,11 @@ resource "aws_security_group" "swarm_sg" {
     self      = true
   }
 
-  ingress { # Libera SSH vindo do Bastion
+  ingress { # Libera SSH vindo do haproxy
     from_port       = 22
     to_port         = 22
     protocol        = "tcp"
-    security_groups = [aws_security_group.bastion_sg.id]
+    security_groups = [aws_security_group.haproxy_sg.id]
   }
 
   ingress {
@@ -139,15 +152,15 @@ resource "aws_security_group" "swarm_sg" {
 
 # --- 3. Instâncias ---
 
-# Bastion Host
-resource "aws_instance" "bastion" {
+# haproxy Host
+resource "aws_instance" "haproxy" {
   ami                         = data.aws_ami.ubuntu.id # Amazon Linux 2 (us-east-1)
   instance_type               = "t2.micro"
   subnet_id                   = module.vpc.public_subnets[0]
-  vpc_security_group_ids      = [aws_security_group.bastion_sg.id]
+  vpc_security_group_ids      = [aws_security_group.haproxy_sg.id]
   key_name                    = aws_key_pair.kp.key_name
   associate_public_ip_address = true
-  tags                        = { Name = "Bastion" }
+  tags                        = { Name = "haproxy" }
 
   # Configura porta 60022
   user_data = <<-EOF
@@ -172,6 +185,16 @@ resource "aws_instance" "manager" {
   
   vpc_security_group_ids = [aws_security_group.swarm_sg.id]
   key_name               = aws_key_pair.kp.key_name
+
+
+  # --- NOVO BLOCO EBS PARA GLUSTER ---
+  ebs_block_device {
+    device_name = "/dev/sdb" # Ou /dev/xvdb, depende do tipo de instância e AMI
+    volume_size = 20         # 20 GiB para o Gluster
+    volume_type = "standard"     
+    encrypted   = false
+    delete_on_termination = true
+  }
 
   tags = { 
     # each.key agora é "swarm-manager-01", "swarm-manager-02", etc.
@@ -204,25 +227,31 @@ resource "local_file" "ansible_inventory" {
   filename = "${path.module}/inventory.ini"
   
   content  = <<-EOT
-    [bastion]
-    ${aws_instance.bastion.public_ip}
-
-    [managers]
+    [haproxy]
+    # CORREÇÃO: Linha única, usando o nome lógico 'haproxy' como inventory_hostname.
+    haproxy ansible_host=${aws_instance.haproxy.public_ip} private_ip=${aws_instance.haproxy.private_ip} ansible_port=60022
+    
+    [swarm_managers]
     %{ for name, vm in aws_instance.manager ~}
-    ${vm.private_ip}
+    ${name} ansible_host=${vm.private_ip} private_ip=${vm.private_ip}
     %{ endfor ~}
 
     [workers]
     %{ for name, vm in aws_instance.worker ~}
-    ${vm.private_ip}
+    ${name} ansible_host=${vm.private_ip} private_ip=${vm.private_ip}
+    %{ endfor ~}
+
+    [gluster_nodes] 
+    %{ for name, vm in aws_instance.manager ~}
+    ${name} ansible_host=${vm.private_ip} private_ip=${vm.private_ip}
     %{ endfor ~}
 
     [all:vars]
     ansible_user=ubuntu
     ansible_ssh_private_key_file=./chave-cazia.pem
-    
-    # MUDANÇA AQUI TAMBÉM (dentro do comando SSH, troque ec2-user por ubuntu)
-    ansible_ssh_common_args='-o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 60022 -i ./chave-cazia.pem -W %h:%p -q ubuntu@${aws_instance.bastion.public_ip}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    device2_hdd_dev=/dev/sdb
+    # Configuração de Proxy para os hosts internos (Managers e Workers)
+    ansible_ssh_common_args='-o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 60022 -i ./chave-cazia.pem -W %h:%p -q ubuntu@${aws_instance.haproxy.public_ip}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
   EOT
 }
 
@@ -234,13 +263,12 @@ resource "null_resource" "run_ansible" {
 
   depends_on = [
     local_file.ansible_inventory,
-    aws_instance.bastion,
+    aws_instance.haproxy,
     aws_instance.worker,
     aws_instance.manager,
     module.vpc,
-    cloudflare_dns_record.traefik,
     cloudflare_dns_record.whoami,
-    aws_lb.swarm_nlb # Adicionamos dependência do NLB
+#    aws_lb.swarm_nlb
   ]
 
   provisioner "local-exec" {
@@ -250,12 +278,12 @@ resource "null_resource" "run_ansible" {
       
       # 1. Executa o Playbook de Deploy (Instalação e Swarm)
       echo "Iniciando Playbook de Deploy..."
-      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini ansible/playbook.yml
+      #ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini ansible/playbook.yml
       
       # 2. Executa o Playbook de Validação dos Endpoints
       echo "Iniciando validação dos endpoints Traefik (aguardando DNS e ACME)..."
       # Usamos '-e @swarm_vars.yml' para injetar o 'base_domain' no playbook de validação
-      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini ansible/deploy_traefik.yml -e @ansible/swarm_vars.yml
+      #ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini ansible/deploy_traefik.yml -e @ansible/swarm_vars.yml
       #ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini validate_endpoints.yml -e @swarm_vars.yml
       
       echo "✅ VALIDAÇÃO DO AMBIENTE CONCLUÍDA COM SUCESSO!"

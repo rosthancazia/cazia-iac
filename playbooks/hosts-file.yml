@@ -1,0 +1,21 @@
+- name: Configure Hostnames and /etc/hosts
+  hosts: all # Roda em todas as máquinas (haproxy, managers, workers)
+  become: yes
+  tasks:
+    # 1. Configura o Hostname do Sistema
+    - name: Set system hostname
+      hostname:
+        name: "{{ ansible_host_name }}" # Usa a variável que injetamos no inventário
+
+    # 2. Gera as Entradas de Hosts (para que todas as máquinas possam se comunicar por nome)
+    - name: Ensure /etc/hosts has all private IPs for internal name resolution
+      lineinfile:
+        path: /etc/hosts
+        regexp: '.*{{ hostvars[item].private_ip }}.*'
+        line: "{{ hostvars[item].private_ip }} {{ hostvars[item].ansible_host_name }} {{ hostvars[item].ansible_host_name }}.local"
+        state: present
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ groups['swarm_managers'] + groups['workers'] + groups['haproxy'] }}"
+      # O loop itera sobre todos os hosts do inventário para injetar no /etc/hosts de cada um.

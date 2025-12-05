@@ -1,0 +1,159 @@
+---
+    - name: Coletar fatos do sistema
+      setup:
+
+    - name: 3. Atualizar e fazer upgrade completo dos pacotes do sistema
+      become: true
+      become_method: sudo
+      apt:
+        update_cache: yes
+        upgrade: dist # Faz o upgrade completo para garantir a última versão do kernel/pacotes
+        cache_valid_time: 3600
+
+    - name: Instalar dependências do sistema
+      become: true
+      become_method: sudo
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - gnupg
+          - lsb-release
+        state: latest
+        update_cache: yes
+
+    # 2. Configuração do Repositório Oficial Docker
+    - name: Adicionar chave GPG do Docker
+      become: true
+      become_method: sudo
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Adicionar repositório Docker (Dinâmico conforme versão do OS)
+      become: true
+      become_method: sudo
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    # 3. Instalação do Docker e SDK
+    - name: Instalar Docker CE e Python SDK
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+          # AQUI ESTÁ O PULO DO GATO:
+          # Usamos o pacote do sistema ao invés do PIP para evitar conflitos de SSL/urllib3
+          - python3-docker 
+        state: latest
+        update_cache: yes
+
+    - name: Garantir que o Docker está rodando
+      become: true
+      become_method: sudo
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Adicionar usuário ubuntu ao grupo docker
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Install Docker Python library
+      become: true
+      become_method: sudo
+      pip:
+        name: docker
+    
+    # - name: Remove old versions of Docker
+    #   become: true
+    #   become_method: sudo
+    #   apt:
+    #     state: absent
+    #     pkg:
+    #       - docker
+    #       - docker-engine
+    #       - docker.io
+    #       - containerd
+    #       - runc
+    #     force_apt_get: true
+    
+    # - name: Install Docker GPG key
+    #   become: true
+    #   become_method: sudo
+    #   apt_key:
+    #     url: https://download.docker.com/linux/ubuntu/gpg
+    #     state: present
+    
+    # - name: Add Docker repository
+    #   become: true
+    #   become_method: sudo
+    #   apt_repository:
+    #     repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"    
+    #     state: present
+    
+    # - name: Install Docker
+    #   become: true
+    #   become_method: sudo
+    #   apt:
+    #     pkg:
+    #           - docker-ce
+    #           - docker-ce-cli
+    #           - containerd.io
+    #           - docker-compose-plugin
+    #           # AQUI ESTÁ O PULO DO GATO:
+    #           # Usamos o pacote do sistema ao invés do PIP para evitar conflitos de SSL/urllib3
+    #           - python3-docker 
+    #     state: present
+    #     force_apt_get: true
+    #     update_cache: yes
+    
+    # - name: Add "{{ansible_user}}" user to "docker" group
+    #   become: true
+    #   become_method: sudo
+    #   user:
+    #     name: ubuntu
+    #     groups: docker
+    #     append: yes
+    
+    # - name: Waiting for Docker service to become available
+    #   wait_for:
+    #     path: /var/run/docker.sock
+    
+    # - name: Ensure 'ubuntu' user is in the 'docker' group
+    #   become: true
+    #   ansible.builtin.user:
+    #     name: ubuntu
+    #     groups: docker
+    #     append: yes
+    
+    - name: Ensure docker is Running
+      become: true
+      become_method: sudo
+      service:
+        name: docker
+        state: started
+        enabled: yes
+    
+    # - name: Reboot host(s) after Docker install
+    #   shell: sleep 2 && /sbin/shutdown -r now "ansible reboot request"
+    #   async: 1
+#   poll: 0
+#   ignore_errors: true
+#   become: true
+#   become_method: sudo
+#   when: inventory_hostname != "127.0.0.1" and inventory_hostname != "localhost"
+
+# - name: Waiting for host(s) to reboot
+#   local_action: "wait_for host={{inventory_hostname}} port=22 state=started delay=60"
+#   become: false
+#   ignore_errors: true
+#   when: inventory_hostname != "127.0.0.1" and inventory_hostname != "localhost"
